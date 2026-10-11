@@ -75,14 +75,18 @@ static bool g_verbose = false;
 // The Android .so files may have constructors that crash before main().
 
 typedef ITMGContext* (*FnGetInstance)();
+typedef ITMGContext* (*FnGetInstanceInner)(const char*);
 typedef int (*FnGenAuthBuffer)(int, const char*, const char*, const char*, unsigned char*, int);
 
 static FnGetInstance pfnGetInstance = nullptr;
+static FnGetInstanceInner pfnGetInstanceInner = nullptr;
 static FnGenAuthBuffer pfnGenAuthBuffer = nullptr;
 static void* g_sdkHandle = nullptr;
 
-// Wrapper that uses dlopen'd function pointer
+// Wrapper that uses dlopen'd function pointer. The 2.9.x SDK only exports
+// ITMGContextGetInstanceInner(version); ITMGContextGetInstance() is a header inline.
 static ITMGContext* GetGMEContext() {
+    if (pfnGetInstanceInner) return pfnGetInstanceInner(TMG_SDK_VERSION);
     if (pfnGetInstance) return pfnGetInstance();
     return nullptr;
 }
@@ -127,12 +131,13 @@ bool loadGMESDK() {
     LOGI("[SDK] libgmesdk.so loaded OK!\n");
 
     // Resolve ITMGContextGetInstance
-    pfnGetInstance = (FnGetInstance)dlsym(g_sdkHandle, "ITMGContextGetInstance");
-    if (!pfnGetInstance) {
+    pfnGetInstanceInner = (FnGetInstanceInner)dlsym(g_sdkHandle, "ITMGContextGetInstanceInner");
+    if (!pfnGetInstanceInner) pfnGetInstance = (FnGetInstance)dlsym(g_sdkHandle, "ITMGContextGetInstance");
+    if (!pfnGetInstanceInner && !pfnGetInstance) {
         // Try C++ mangled name
         pfnGetInstance = (FnGetInstance)dlsym(g_sdkHandle, "_Z21ITMGContextGetInstancev");
     }
-    if (!pfnGetInstance) {
+    if (!pfnGetInstanceInner && !pfnGetInstance) {
         LOGE("[SDK] FATAL: Cannot find ITMGContextGetInstance symbol\n");
         return false;
     }
@@ -151,7 +156,7 @@ bool loadGMESDK() {
 
     // Test: call ITMGContextGetInstance
     LOGI("[SDK] Calling ITMGContextGetInstance()...\n");
-    ITMGContext* ctx = pfnGetInstance();
+    ITMGContext* ctx = GetGMEContext();
     LOGI("[SDK] ITMGContextGetInstance() returned: %p\n", (void*)ctx);
 
     if (!ctx) {
@@ -904,7 +909,7 @@ void signalHandler(int sig) {
     g_running = false;
     if (g_playing) stopMusic();
     ITMGContext* ctx = GetGMEContext();
-    if (ctx) {
+    if (ctx && g_initialized) {
         if (g_inRoom) ctx->ExitRoom();
         ctx->Uninit();
     }
@@ -966,7 +971,8 @@ int main(int argc, char* argv[]) {
 
     // ==================== MAIN LOOP ====================
     while (g_running) {
-        if (g_sdkLoaded) {
+        // The Android-built SDK segfaults when polled before Init().
+        if (g_sdkLoaded && g_initialized) {
             ITMGContext* ctx = GetGMEContext();
             if (ctx) ctx->Poll();
         }

@@ -34,6 +34,7 @@ SHT_DYNAMIC = 6               # .dynamic
 DT_NULL = 0
 DT_VERNEED = 0x6ffffffe
 DT_VERNEEDNUM = 0x6fffffff
+DT_VERSYM = 0x6ffffff0
 
 
 def patch_elf(filename):
@@ -122,6 +123,13 @@ def patch_elf(filename):
                     elif d_tag == DT_VERNEEDNUM:
                         struct.pack_into('<q', data, off, DT_IGNORED + 1)
                         print(f"  Removed DT_VERNEEDNUM (replaced tag with 0x{DT_IGNORED+1:x})")
+                        dynamic_patched = True
+                    elif d_tag == DT_VERSYM:
+                        # Without DT_VERNEED/DT_VERDEF, ld.so never allocates
+                        # l_versions, but a remaining DT_VERSYM makes relocation
+                        # index into it (NULL deref → SIGSEGV inside dlopen).
+                        struct.pack_into('<q', data, off, DT_IGNORED - 1)
+                        print(f"  Removed DT_VERSYM (replaced tag with 0x{DT_IGNORED-1:x})")
                         dynamic_patched = True
                 if dynamic_patched:
                     f.seek(sh_offset)

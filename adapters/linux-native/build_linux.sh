@@ -36,9 +36,10 @@ mkdir -p "$(dirname -- "$output")"
 read -r -a curl_flags <<< "$(pkg-config --cflags --libs libcurl)"
 
 "$cxx" -std=c++17 -O2 -pthread -rdynamic \
+  -I"$sdk_dir/include" -I"$script_dir/../windows-native" \
   main_linux.cpp -o "$output" \
   "${curl_flags[@]}" -ldl -lz -lm \
-  -Wl,-rpath,'$ORIGIN/../vendor-sdk/lib'
+  -Wl,--disable-new-dtags -Wl,-rpath,'$ORIGIN/../vendor-sdk/lib'
 
 echo "Built $output"
 echo "Bundled GME SDK runtime libraries: $sdk_lib_dir"
