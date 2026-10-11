@@ -67,7 +67,12 @@ if (( run_adapter )); then
     # The native Linux adapter loads GME credentials from its own environment.
     if [[ ! -f "$env_file" ]]; then
       (umask 077; cat > "$env_file" <<'EOF'
-# GME app credentials for the Linux adapter (keep this file private).
+# Your own GME app credentials (from Tencent Cloud GME console). Keep private.
+# Used by BOTH:
+#   - the native Linux adapter (read from this process environment), and
+#   - the Waydroid/redroid APK build: adapters/redroid/android/build.sh
+#     bakes these into the app via:  set -a; . ./.env.gme; set +a; bash build.sh
+# GME_SDK_APP_ID must be numeric; GME_SDK_KEY must be exactly 16 characters.
 GME_SDK_APP_ID=
 GME_SDK_KEY=
 EOF
