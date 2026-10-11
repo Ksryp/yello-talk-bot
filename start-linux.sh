@@ -4,9 +4,12 @@
 #   ./start-linux.sh            dev portal, everything bound to 127.0.0.1
 #   ./start-linux.sh --lan      also reachable from other machines on the LAN
 #   ./start-linux.sh --prod     build the portal once and serve the production build
+#   ./start-linux.sh --waydroid drive the GmeBot Android app in a running Waydroid
+#                               session instead of the native Linux adapter
 #   ./start-linux.sh --no-adapter | --no-portal
 #
-# GME credentials are read from .env.gme (Git-ignored, created on first run).
+# The native adapter reads GME credentials from .env.gme (Git-ignored, created
+# on first run); the Waydroid adapter needs none (they live inside the APK).
 # The adapter token is read from config.local.json and generated if empty.
 # Logs go to logs/<service>.log. Ctrl+C stops all services.
 set -euo pipefail
@@ -16,12 +19,14 @@ cd "$root"
 
 bind=127.0.0.1
 portal_mode=dev
+adapter_kind=native
 run_adapter=1
 run_portal=1
 for arg in "$@"; do
   case "$arg" in
     --lan) bind=0.0.0.0 ;;
     --prod) portal_mode=prod ;;
+    --waydroid) adapter_kind=waydroid ;;
     --no-adapter) run_adapter=0 ;;
     --no-portal) run_portal=0 ;;
     -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -58,18 +63,27 @@ if [[ ! -f "$config" ]]; then
 fi
 
 if (( run_adapter )); then
-  if [[ ! -f "$env_file" ]]; then
-    (umask 077; cat > "$env_file" <<'EOF'
+  if [[ "$adapter_kind" == native ]]; then
+    # The native Linux adapter loads GME credentials from its own environment.
+    if [[ ! -f "$env_file" ]]; then
+      (umask 077; cat > "$env_file" <<'EOF'
 # GME app credentials for the Linux adapter (keep this file private).
 GME_SDK_APP_ID=
 GME_SDK_KEY=
 EOF
 )
-    die "Fill in $env_file with your GME AppID and 16-character key, then run again (or use --no-adapter)"
+      die "Fill in $env_file with your GME AppID and 16-character key, then run again (or use --no-adapter)"
+    fi
+    set -a; . "./$env_file"; set +a
+    [[ "${GME_SDK_APP_ID:-}" =~ ^[0-9]+$ ]] || die "GME_SDK_APP_ID in $env_file must be numeric"
+    [[ ${#GME_SDK_KEY} -eq 16 ]] || die "GME_SDK_KEY in $env_file must be exactly 16 characters"
+  else
+    # The Waydroid adapter drives the GmeBot Android app, which carries its own
+    # GME credentials inside the APK; this process needs no GME_SDK_* vars.
+    command -v waydroid >/dev/null || die "waydroid is not installed"
+    waydroid status 2>/dev/null | grep -q 'Session:.*RUNNING' \
+      || die "Waydroid session is not running — start it with: waydroid session start"
   fi
-  set -a; . "./$env_file"; set +a
-  [[ "${GME_SDK_APP_ID:-}" =~ ^[0-9]+$ ]] || die "GME_SDK_APP_ID in $env_file must be numeric"
-  [[ ${#GME_SDK_KEY} -eq 16 ]] || die "GME_SDK_KEY in $env_file must be exactly 16 characters"
 
   # Reuse adapter.token from the config, generating one if it is empty, so the
   # API and the adapter always agree.
@@ -86,7 +100,7 @@ EOF
   export GME_ADAPTER_TOKEN
   adapter_port="$(node -e 'const c=require(process.argv[1]);process.stdout.write(new URL(c.adapter?.baseUrl||"http://127.0.0.1:9876").port||"9876")' "$root/$config")"
 
-  if [[ ! -x "$adapter_bin" || adapters/linux-native/main_linux.cpp -nt "$adapter_bin" ]]; then
+  if [[ "$adapter_kind" == native && ( ! -x "$adapter_bin" || adapters/linux-native/main_linux.cpp -nt "$adapter_bin" ) ]]; then
     info "Building the Linux GME adapter"
     bash adapters/linux-native/build_linux.sh >/dev/null
   fi
@@ -143,10 +157,15 @@ wait_http() { # name, url, [header]
 }
 
 if (( run_adapter )); then
-  start adapter "$adapter_bin" --port "$adapter_port"
-  wait_http adapter "http://127.0.0.1:$adapter_port/health" "x-gme-adapter-token: $GME_ADAPTER_TOKEN"
-  sdk="$(curl -fs -H "x-gme-adapter-token: $GME_ADAPTER_TOKEN" "http://127.0.0.1:$adapter_port/status" || true)"
-  [[ "$sdk" == *'"sdkLoaded":true'* ]] || echo "warning: adapter is up but the GME SDK did not load; see logs/adapter.log" >&2
+  if [[ "$adapter_kind" == native ]]; then
+    start adapter "$adapter_bin" --port "$adapter_port"
+    wait_http adapter "http://127.0.0.1:$adapter_port/health" "x-gme-adapter-token: $GME_ADAPTER_TOKEN"
+    sdk="$(curl -fs -H "x-gme-adapter-token: $GME_ADAPTER_TOKEN" "http://127.0.0.1:$adapter_port/status" || true)"
+    [[ "$sdk" == *'"sdkLoaded":true'* ]] || echo "warning: adapter is up but the GME SDK did not load; see logs/adapter.log" >&2
+  else
+    start adapter env GME_ADAPTER_TOKEN="$GME_ADAPTER_TOKEN" node adapters/waydroid/server.js --port "$adapter_port"
+    wait_http adapter "http://127.0.0.1:$adapter_port/health" "x-gme-adapter-token: $GME_ADAPTER_TOKEN"
+  fi
 fi
 # The adapter only needs GME credentials; keep them out of the other services.
 unset GME_SDK_APP_ID GME_SDK_KEY GME_ADAPTER_TOKEN
