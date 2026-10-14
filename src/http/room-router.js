@@ -47,6 +47,18 @@ function createRoomRouter({
     }
   });
 
+  router.get('/api/room/:roomId/participants', ownerAuth, async (req, res) => {
+    if (!hasLocalAccount()) return res.status(409).json({ error: 'Configure a local YelloTalk account first' });
+    const roomId = String(req.params.roomId || '').trim();
+    if (!/^[A-Za-z0-9]{1,64}$/.test(roomId)) return res.status(400).json({ error: 'A valid room ID is required' });
+    try {
+      const participants = await api.roomParticipants(getConfig().account.jwtToken, roomId, { max: 50 });
+      return res.json({ participants });
+    } catch {
+      return res.status(502).json({ error: 'Could not load room participants' });
+    }
+  });
+
   router.post('/api/room/auto-join', ownerAuth, (req, res) => {
     if (!hasLocalAccount()) return res.status(409).json({ error: 'Configure the local YelloTalk JWT, UUID, and display name first' });
     const mode = String(req.body?.mode || 'following');

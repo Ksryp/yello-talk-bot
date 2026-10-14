@@ -40,6 +40,9 @@ button.primary { border-color: #2165c5; color: white; background: #2165c5; }
 .room-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; border: 1px solid #e6eaf0; border-radius: 10px; padding: 10px 12px; }
 .room-row > div { display: grid; gap: 3px; }
 .room-row .muted { margin: 0; font-size: 12px; }
+.member-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 3px; }
+.member-chip { border: 1px solid #dce1e8; border-radius: 999px; padding: 2px 9px; color: #475067; background: #f5f7fa; font-size: 12px; line-height: 1.5; white-space: nowrap; }
+.member-chip.more { color: #8892a2; background: #eef1f5; }
 .empty-chat { display: grid; min-height: 250px; margin: 18px 0; place-content: center; border: 1px dashed #d2d9e2; border-radius: 12px; color: #738095; text-align: center; line-height: 1.8; }
 .chat-transcript { display: grid; align-content: start; gap: 8px; min-height: 250px; max-height: 440px; overflow-y: auto; margin: 18px 0; padding: 10px; border: 1px solid #e6eaf0; border-radius: 12px; }
 .chat-transcript .empty-chat { margin: 0; border: 0; }

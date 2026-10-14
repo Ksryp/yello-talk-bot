@@ -30,10 +30,12 @@ function normalizeRoom(room, fallbackId = '') {
   const ownerUuid = String(room.owner?.uuid ?? room.owner_uuid ?? '').trim();
   if (!ROOM_ID_PATTERN.test(id) || !gmeId) return null;
   const count = Number(room.participant_count ?? room.participants_count ?? room.count);
+  const ownerName = String(room.owner?.pin_name ?? room.owner?.name ?? room.owner_name ?? '').trim();
   return {
     id,
     gmeId,
     ownerUuid: ownerUuid.length <= 128 && !/[\u0000-\u001F\u007F]/.test(ownerUuid) ? ownerUuid || null : null,
+    ownerName: ownerName && ownerName.length <= 80 && !/[\u0000-\u001F\u007F]/.test(ownerName) ? ownerName : null,
     topic: String(room.topic ?? room.name ?? '').trim(),
     campus: String(room.owner?.group_shortname ?? room.campus ?? 'No Group').trim() || 'No Group',
     participantCount: Number.isInteger(count) && count >= 0 ? count : null,
@@ -72,6 +74,31 @@ class YelloTalkApiClient {
     const id = String(roomId || '').trim();
     if (!ROOM_ID_PATTERN.test(id)) throw new Error('Invalid room ID');
     return this.http.get(`${this.baseUrl}/rooms/${encodeURIComponent(id)}`, this.requestOptions(token));
+  }
+
+  // The current occupants of a room, as [{ uuid, name, role }]. YelloTalk
+  // returns them under json.results; names come from pin_name.
+  async roomParticipants(token, roomId, { max = 50 } = {}) {
+    const id = String(roomId || '').trim();
+    if (!ROOM_ID_PATTERN.test(id)) return [];
+    const limit = Math.max(1, Math.min(50, Math.trunc(Number(max)) || 50));
+    const response = await this.http.get(
+      `${this.baseUrl}/rooms/${encodeURIComponent(id)}/participants?limit=${limit}&offset=0`,
+      this.requestOptions(token),
+    );
+    const payload = response?.data;
+    const results = payload?.json?.results ?? payload?.results ?? payload?.data?.results ?? [];
+    const out = [];
+    for (const p of Array.isArray(results) ? results : []) {
+      const uuid = String(p?.uuid ?? p?.id ?? '').trim().slice(0, 128);
+      const name = String(p?.pin_name ?? p?.display_name ?? p?.name ?? '')
+        .replace(/[\u0000-\u001F\u007F@]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 40);
+      if (uuid && name) out.push({ uuid, name, role: String(p?.role ?? '').slice(0, 20) });
+    }
+    return out;
   }
 
   async followingPage(token, { limit = FOLLOWING_PAGE_SIZE, offset = 0 } = {}) {
