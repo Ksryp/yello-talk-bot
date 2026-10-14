@@ -70,3 +70,4 @@ adapters/linux-native/vendor-sdk/lib/libc.so
 adapters/linux-native/vendor-sdk/lib/libm.so
 adapters/linux-native/vendor-sdk/lib/libdl.so
 adapters/linux-native/vendor-sdk/lib/libz.so
+secretId/

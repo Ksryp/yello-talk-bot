@@ -15,13 +15,16 @@ function createRoomRouter({
   playback,
   ttsPlayback,
   gmeAdapter,
+  userDirectory,
 } = {}) {
   const router = express.Router();
+  const recordUsers = items => { try { userDirectory?.recordMany(items); } catch { /* best effort */ } };
 
   router.get('/api/rooms', ownerAuth, async (_req, res) => {
     if (!hasLocalAccount()) return res.status(409).json({ error: 'Configure a local YelloTalk account first' });
     try {
       const rooms = await api.listPublicRooms(getConfig().account.jwtToken);
+      recordUsers(rooms.map(room => ({ uuid: room.ownerUuid, name: room.ownerName })));
       return res.json({ rooms });
     } catch {
       return res.status(502).json({ error: 'Could not load the YelloTalk room list' });
@@ -53,6 +56,7 @@ function createRoomRouter({
     if (!/^[A-Za-z0-9]{1,64}$/.test(roomId)) return res.status(400).json({ error: 'A valid room ID is required' });
     try {
       const participants = await api.roomParticipants(getConfig().account.jwtToken, roomId, { max: 50 });
+      recordUsers(participants);
       return res.json({ participants });
     } catch {
       return res.status(502).json({ error: 'Could not load room participants' });
