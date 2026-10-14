@@ -30,7 +30,7 @@ class FakeSocket {
   emit(event, payload, callback) {
     this.emitted.push({ event, payload });
     if (event === 'create_room' || event === 'join_room') callback({ result: 200, room: payload.room });
-    else if (event === 'join_speaker') callback({ result: 200 });
+    else if (['join_speaker', 'leave_speaker', 'lock_speaker', 'unlock_speaker'].includes(event)) callback({ result: 200 });
     else if (event === 'new_message') callback({ result: 200 });
     else if (event === 'leave_room') callback({ result: 200 });
     return this;
@@ -194,6 +194,69 @@ test('automatically requests an available speaker slot and waits for authoritati
     { uuid: 'private-test-id', position: 1, pin_name: 'Local bot', locked: false },
   ] });
   assert.deepEqual(calls.speakerStatuses.at(-1), { joined: true, position: 1 });
+});
+
+test('a host never auto-climbs onto a speaker seat', async () => {
+  const { session, sockets } = createFixture();
+  await session.join({ account, room, createRoom: true });
+  const socket = sockets[0].socket;
+  socket.trigger('speaker_changed', [null, { role: 'locked', pin_name: '🔒', uuid: null, position: 2 }]);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(socket.emitted.some(item => item.event === 'join_speaker'), false);
+  assert.equal(session.seatsSnapshot().isHost, true);
+  await session.leave();
+});
+
+test('joining a room the bot owns also skips the automatic seat', async () => {
+  const { session, sockets } = createFixture();
+  await session.join({ account, room: { ...room, owner: { uuid: 'private-test-id' } } });
+  sockets[0].socket.trigger('speaker_changed', [null]);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(sockets[0].socket.emitted.some(item => item.event === 'join_speaker'), false);
+  await session.leave();
+});
+
+test('maps speaker_changed into ten 1-indexed seats', async () => {
+  const { session, sockets } = createFixture();
+  await session.join({ account, room, createRoom: true });
+  sockets[0].socket.trigger('speaker_changed', [
+    null,
+    { role: 'locked', pin_name: '🔒', uuid: null, position: 2 },
+    { role: 'speaker', pin_name: 'Member', uuid: 'another-member', position: 3 },
+    { role: 'speaker', pin_name: 'Local bot', uuid: 'private-test-id', position: 4 },
+  ]);
+  const { seats } = session.seatsSnapshot();
+  assert.equal(seats.length, 10);
+  assert.deepEqual(seats.slice(0, 4).map(seat => [seat.position, seat.state, seat.isBot]), [
+    [1, 'open', false], [2, 'locked', false], [3, 'occupied', false], [4, 'occupied', true],
+  ]);
+  assert.equal(seats[9].state, 'open');
+  await session.leave();
+});
+
+test('owner seat actions move, leave, and unlock seats and stop auto-seating', async () => {
+  const { session, sockets } = createFixture();
+  await session.join({ account, room });
+  const socket = sockets[0].socket;
+  socket.trigger('speaker_changed', [{ role: 'speaker', pin_name: 'Local bot', uuid: 'private-test-id', position: 1 }, null]);
+  socket.emitted.length = 0;
+
+  await session.seatAction('take', 2);
+  assert.deepEqual(socket.emitted.map(item => [item.event, item.payload]), [
+    ['leave_speaker', { room: 'room-1', uuid: 'private-test-id', position: 1 }],
+    ['join_speaker', { room: 'room-1', uuid: 'private-test-id', position: 2 }],
+  ]);
+  assert.equal(session.seatsSnapshot().autoSeat, false);
+
+  socket.emitted.length = 0;
+  await session.seatAction('unlock', 5);
+  assert.deepEqual(socket.emitted.map(item => [item.event, item.payload]), [['unlock_speaker', { room: 'room-1', position: 5 }]]);
+
+  socket.trigger('speaker_changed', [null, null]);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(socket.emitted.some(item => item.event === 'join_speaker'), false);
+  await assert.rejects(session.seatAction('take', 11), /1-10/);
+  await session.leave();
 });
 
 test('manual leave emits leave_room and clears room-bound queue through callback', async () => {

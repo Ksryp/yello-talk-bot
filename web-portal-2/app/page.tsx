@@ -16,8 +16,9 @@ type Config = {
   settings: Settings
   warning?: string
 }
-type Tab = 'เพลง' | 'แชต' | 'ผู้ใช้' | 'ตั้งค่า'
-type DirectoryUser = { uuid: string; name: string; previousNames: string[] }
+type Seat = { position: number; state: 'open' | 'locked' | 'occupied'; uuid: string | null; name: string | null; isBot: boolean }
+type SeatState = { connected: boolean; roomId?: string; isHost?: boolean; autoSeat?: boolean; seats?: Seat[] | null }
+type Tab = 'เพลง' | 'ห้อง' | 'ตั้งค่า'
 
 function getApiBase() {
   if (typeof window === 'undefined') return 'http://localhost:5353'
@@ -40,9 +41,8 @@ export default function Home() {
   const [musicQueue, setMusicQueue] = useState<MusicQueue | null>(null)
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [chatDraft, setChatDraft] = useState('')
-  const [users, setUsers] = useState<DirectoryUser[]>([])
-  const [usersCount, setUsersCount] = useState(0)
-  const [usersQuery, setUsersQuery] = useState('')
+  const [seatState, setSeatState] = useState<SeatState | null>(null)
+  const joined = status?.connection === 'joined'
 
   async function refreshStatus() {
     try {
@@ -93,37 +93,27 @@ export default function Home() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  async function loadUsers(query = usersQuery) {
-    if (!token) return
-    setBusy(true); setNotice('')
-    try {
-      const params = new URLSearchParams({ limit: '1000' })
-      if (query.trim()) params.set('q', query.trim())
-      const response = await fetch(`${base}/api/users?${params}`, { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' })
-      const body = await response.json()
-      if (!response.ok) throw new Error(body.error || 'โหลดรายชื่อผู้ใช้ไม่สำเร็จ')
-      setUsers(body.users as DirectoryUser[])
-      setUsersCount(body.count as number)
-    } catch (error) { setNotice(error instanceof Error ? error.message : 'โหลดรายชื่อผู้ใช้ไม่สำเร็จ') }
-    finally { setBusy(false) }
-  }
+  // The room monitor only exists while the bot is in a room.
+  useEffect(() => {
+    if (tab === 'ห้อง' && status && !joined) setTab('เพลง')
+  }, [tab, status, joined])
 
   useEffect(() => {
-    if (tab !== 'ผู้ใช้' || !token) return
-    void loadUsers()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, token])
-
-  useEffect(() => {
-    if (tab !== 'แชต' || !token) return
+    if (tab !== 'ห้อง' || !token) return
     let cancelled = false
     const refresh = async () => {
       try {
-        const response = await fetch(`${base}/api/chat/messages`, { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' })
-        if (!response.ok) return
-        const body = await response.json() as { connected: boolean; messages: ChatMessage[] }
-        if (!cancelled) setChatMessages(body.connected ? body.messages : [])
-      } catch { /* The chat is read-only until the next successful poll. */ }
+        const headers = { Authorization: `Bearer ${token}` }
+        const [chatResponse, seatResponse] = await Promise.all([
+          fetch(`${base}/api/chat/messages`, { headers, cache: 'no-store' }),
+          fetch(`${base}/api/room/seats`, { headers, cache: 'no-store' }),
+        ])
+        if (chatResponse.ok) {
+          const body = await chatResponse.json() as { connected: boolean; messages: ChatMessage[] }
+          if (!cancelled) setChatMessages(body.connected ? body.messages : [])
+        }
+        if (seatResponse.ok && !cancelled) setSeatState(await seatResponse.json() as SeatState)
+      } catch { /* The monitor is read-only until the next successful poll. */ }
     }
     void refresh()
     const timer = window.setInterval(() => void refresh(), 1500)
@@ -282,6 +272,24 @@ export default function Home() {
     finally { setBusy(false) }
   }
 
+  async function seatAction(action: 'take' | 'leave' | 'unlock' | 'lock', position: number) {
+    if (!token) return
+    setBusy(true); setNotice('')
+    try {
+      const response = await fetch(`${base}/api/room/seat`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, position }),
+      })
+      const body = await response.json()
+      if (!response.ok) throw new Error(body.error || 'เปลี่ยนที่นั่งไม่สำเร็จ')
+      setNotice(action === 'take' ? `นั่งที่ Position ${position} แล้ว` : action === 'leave' ? 'ลุกจากที่นั่งแล้ว' : action === 'unlock' ? `ปลดล็อค Position ${position} แล้ว` : `ล็อค Position ${position} แล้ว`)
+      const seats = await fetch(`${base}/api/room/seats`, { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' })
+      if (seats.ok) setSeatState(await seats.json() as SeatState)
+    } catch (error) { setNotice(error instanceof Error ? error.message : 'เปลี่ยนที่นั่งไม่สำเร็จ') }
+    finally { setBusy(false) }
+  }
+
   async function musicAction(action: 'skip' | 'pause' | 'resume' | 'stop') {
     if (!token) return
     setBusy(true); setNotice('')
@@ -303,16 +311,17 @@ export default function Home() {
 
   return <main className="shell">
     <header className="header"><div><p className="eyebrow">LOCAL CONTROL PANEL</p><h1>Yello Music Bot</h1></div><span className="status-pill"><i className={status?.accountConfigured ? 'dot ready' : 'dot'} />{status?.phase || 'กำลังตรวจสถานะ'}</span></header>
-    <nav className="tabs" aria-label="เมนูหลัก">{(['เพลง', 'แชต', 'ผู้ใช้', 'ตั้งค่า'] as Tab[]).map(item => <button key={item} className={tab === item ? 'tab active' : 'tab'} onClick={() => setTab(item)}>{item}</button>)}</nav>
+    <nav className="tabs" aria-label="เมนูหลัก">{(['เพลง', 'ห้อง', 'ตั้งค่า'] as Tab[]).map(item => <button key={item} className={tab === item ? 'tab active' : 'tab'} onClick={() => setTab(item)} disabled={item === 'ห้อง' && !joined} title={item === 'ห้อง' && !joined ? 'เข้าห้องก่อนจึงจะดูห้องได้' : undefined}>{item}</button>)}</nav>
     {notice && <div className="notice" role="status">{notice}</div>}
 
     {!token && <form className="card owner-card" onSubmit={connectOwner}><h2>ยืนยันสิทธิ์เจ้าของ</h2><p>ใส่ token จากไฟล์ local <code>owner-token.txt</code> บนเครื่องที่รันบอท</p><div className="inline-form"><input aria-label="Owner token" type="password" autoComplete="off" value={token} onChange={event => setToken(event.target.value)} placeholder="Owner token" /><button className="primary" disabled={busy || !token}>ยืนยัน</button></div></form>}
 
     {tab === 'เพลง' && <section className="card"><div className="section-heading"><div><p className="eyebrow">PLAYBACK</p><h2>ควบคุมเพลง</h2></div><span className="badge">{status?.recovery.status === 'waiting' || status?.recovery.status === 'recovering' ? `กำลังกู้คืน ${status.recovery.attempt}/${status.recovery.maxAttempts}` : status?.recovery.status === 'exhausted' ? 'กู้คืนไม่สำเร็จ · เลือกห้องใหม่' : status?.connection || 'ยังไม่เชื่อมต่อ'}</span></div><div className="stats"><div><span>เพลง</span><strong>{status?.playback || 'idle'}</strong></div><div><span>ในคิว</span><strong>{status?.queueLength ?? 0}</strong></div><div><span>Audio adapter</span><strong>{status?.audioAdapterConfigured ? 'ตั้งค่าแล้ว' : 'ยังไม่ตั้งค่า'}</strong></div></div><p className="muted">{status?.room?.name ? `ห้องปัจจุบัน: ${status.room.name}` : 'เลือกห้องเพื่อเชื่อมต่อ YelloTalk'} · เล่นเพลงได้เมื่อเชื่อม adapter เสียงใน config.local.json</p><div className="button-row"><button onClick={() => void loadRooms()} disabled={busy || !token}>โหลดห้องสาธารณะ</button><button onClick={() => void autoJoinFollowing()} disabled={busy || !token}>สุ่มเข้าห้องของคนที่ติดตาม</button>{status?.connection === 'joined' && <button onClick={() => void leaveRoom()} disabled={busy}>ออกจากห้อง</button>}<button onClick={() => void musicAction('skip')} disabled={busy || !canControlMusic || !musicQueue?.queue.current}>ข้ามเพลง</button>{status?.playback === 'paused' ? <button onClick={() => void musicAction('resume')} disabled={busy || !canControlMusic}>เล่นต่อ</button> : <button onClick={() => void musicAction('pause')} disabled={busy || !canControlMusic || status?.playback !== 'playing'}>พักเพลง</button>}<button onClick={() => void musicAction('stop')} disabled={busy || !canControlMusic}>หยุดและล้างคิว</button></div><p className="muted">สุ่มเลือกเฉพาะห้องสาธารณะของบัญชีที่ติดตาม; โหมดสุ่มห้อง public ที่ตรวจ speaker ว่างยังปิดไว้จนกว่าจะยืนยันวิธี preflight ได้</p><form className="inline-form" onSubmit={requestMusic}><input aria-label="YouTube song or search" value={musicRequest} onChange={event => setMusicRequest(event.target.value)} placeholder="ค้นหาเพลงหรือวาง YouTube URL" disabled={busy || !canControlMusic} /><button className="primary" disabled={busy || !canControlMusic || !musicRequest.trim()}>เพิ่มเพลง</button></form><form className="inline-form" onSubmit={createPublicRoom}><input aria-label="ชื่อห้องสาธารณะ" maxLength={100} value={roomTopic} onChange={event => setRoomTopic(event.target.value)} placeholder="ชื่อห้องสาธารณะ (ใช้ topic แบบเดิม)" disabled={busy || !token} /><button className="primary" disabled={busy || !token || !roomTopic.trim()}>สร้างห้อง</button></form><p className="muted">สร้างห้องสาธารณะและเชื่อมต่อทันที โดยใช้ topic เป็นชื่อห้อง ไม่มีคำอธิบายแยก</p><div className="inline-form"><input aria-label="Room ID" value={roomId} onChange={event => setRoomId(event.target.value)} placeholder="หรือใส่ Room ID" disabled={busy || !token} /><button onClick={() => void joinRoom(roomId)} disabled={busy || !token || !roomId.trim()}>เชื่อมต่อ</button></div>{musicQueue?.queue.current && <p className="muted">กำลังเล่น: {musicQueue.queue.current.title}</p>}{musicQueue?.queue.upcoming.length ? <div className="room-list queue-list">{musicQueue.queue.upcoming.map((item, index) => <div className="room-row" key={item.queueId}><div><strong>{index + 1}. {item.title}</strong><span className="muted">{Math.ceil(item.durationSeconds / 60)} นาที · {item.requestedBy || 'ผู้ใช้'}</span></div></div>)}</div> : null}{rooms.length > 0 && <div className="room-list">{rooms.map(room => <div className="room-row" key={room.id}><div><strong>{room.topic || room.id}</strong><span className="muted">{room.ownerName || room.campus}{room.participantCount == null ? '' : ` · ${room.participantCount} คน`}</span>{roomMembers[room.id]?.length ? <span className="member-chips">{roomMembers[room.id].slice(0, 20).map((name, index) => <span className="member-chip" key={index}>{name}</span>)}{roomMembers[room.id].length > 20 ? <span className="member-chip more">+{roomMembers[room.id].length - 20}</span> : null}</span> : null}</div><button onClick={() => void joinRoom(room.id)} disabled={busy || status?.room?.id === room.id}>{status?.room?.id === room.id ? 'เชื่อมต่ออยู่' : 'เข้าห้อง'}</button></div>)}</div>}</section>}
 
-    {tab === 'แชต' && <section className="card"><div className="section-heading"><div><p className="eyebrow">ROOM CHAT</p><h2>แชตสด</h2></div><span className="badge">{status?.connection === 'joined' ? 'เชื่อมต่ออยู่' : status?.accountConfigured ? 'รอเชื่อมต่อห้อง' : 'ยังไม่มีบัญชี'}</span></div><div className="chat-transcript" aria-label="ข้อความล่าสุดในห้อง" aria-live="polite">{chatMessages.length ? chatMessages.map(message => <article className={`chat-message ${message.direction}`} key={message.id}><div><strong>{message.sender}</strong><time>{new Date(message.createdAt).toLocaleTimeString()}</time></div><p>{message.text}</p></article>) : <div className="empty-chat">ข้อความจะแสดงเมื่อเชื่อมต่อห้องแล้ว<br />เก็บไว้ชั่วคราวใน RAM สูงสุด 100 ข้อความ</div>}</div><form className="inline-form" onSubmit={sendChat}><input aria-label="พิมพ์ข้อความถึงห้อง" maxLength={800} value={chatDraft} onChange={event => setChatDraft(event.target.value)} disabled={busy || !token || status?.connection !== 'joined'} placeholder="พิมพ์ข้อความถึงห้อง" /><button className="primary" disabled={busy || !token || status?.connection !== 'joined' || !chatDraft.trim()}>ส่ง</button></form><p className="muted">ส่งผ่าน owner token เท่านั้น; ข้อความจากเว็บไม่เรียกคำสั่งเพลงและไม่บันทึกลงไฟล์</p></section>}
-
-    {tab === 'ผู้ใช้' && <section className="card"><div className="section-heading"><div><p className="eyebrow">USER DIRECTORY</p><h2>ฐานข้อมูลผู้ใช้</h2></div><span className="badge">{usersCount} UUID</span></div><p className="muted">เก็บอัตโนมัติทุกครั้งที่บอทเห็นชื่อ (เจ้าของห้อง · คนในห้อง · คนเข้า/ออก) — เก็บชื่อปัจจุบันและชื่อที่เคยใช้ ต่อ 1 UUID</p><form className="inline-form" onSubmit={event => { event.preventDefault(); void loadUsers(usersQuery) }}><input aria-label="ค้นหาผู้ใช้" value={usersQuery} onChange={event => setUsersQuery(event.target.value)} placeholder="ค้นหาชื่อ / ชื่อเก่า / UUID" disabled={busy || !token} /><button className="primary" disabled={busy || !token}>ค้นหา</button><button type="button" onClick={() => { setUsersQuery(''); void loadUsers('') }} disabled={busy || !token}>ล้าง</button></form>{users.length > 0 ? <div className="room-list">{users.map(user => <div className="room-row" key={user.uuid}><div><strong>{user.name || '(ไม่มีชื่อ)'}</strong><span className="muted">{user.uuid}</span>{user.previousNames.length ? <span className="member-chips">{user.previousNames.map((name, index) => <span className="member-chip" key={index}>{name}</span>)}</span> : null}</div></div>)}</div> : <p className="muted">{token ? 'ยังไม่มีข้อมูล — เปิดแท็บเพลงแล้วโหลดห้อง/เข้าห้อง เพื่อให้บอทเริ่มเก็บชื่อ' : 'ใส่ owner token ก่อน'}</p>}</section>}
+    {tab === 'ห้อง' && joined && <section className="card"><div className="section-heading"><div><p className="eyebrow">ROOM MONITOR</p><h2>{status?.room?.name || status?.room?.id || 'ห้องปัจจุบัน'}</h2></div><span className="badge">{seatState?.isHost ? 'บอทเป็นหัวห้อง' : 'บอทเป็นผู้ร่วมห้อง'}</span></div>
+      <div className="seat-grid" aria-label="ที่นั่งในห้อง">{seatState?.seats ? seatState.seats.map(seat => <div className={`seat ${seat.state}${seat.isBot ? ' bot' : ''}`} key={seat.position}><span className="seat-number">Position {seat.position}</span><strong>{seat.state === 'locked' ? '🔒 ล็อคอยู่' : seat.state === 'open' ? 'ว่าง' : seat.isBot ? `${seat.name || 'บอท'} (บอท)` : seat.name || 'มีคนนั่ง'}</strong>{seat.state === 'open' && <div className="seat-actions"><button onClick={() => void seatAction('take', seat.position)} disabled={busy}>นั่งที่นี่</button>{seatState.isHost && <button onClick={() => void seatAction('lock', seat.position)} disabled={busy}>ล็อค</button>}</div>}{seat.state === 'locked' && <div className="seat-actions"><button onClick={() => void seatAction('unlock', seat.position)} disabled={busy}>ปลดล็อค</button></div>}{seat.isBot && <div className="seat-actions"><button onClick={() => void seatAction('leave', seat.position)} disabled={busy}>ลุก</button></div>}</div>) : <div className="empty-chat">รอข้อมูลที่นั่งจากห้อง…</div>}</div>
+      {seatState && !seatState.isHost && seatState.autoSeat && <p className="muted">บอทจะหาที่นั่งว่างเองจนกว่าจะเลือกที่นั่งจากหน้านี้</p>}
+      <h3 className="monitor-subheading">แชตสด</h3><div className="chat-transcript" aria-label="ข้อความล่าสุดในห้อง" aria-live="polite">{chatMessages.length ? chatMessages.map(message => <article className={`chat-message ${message.direction}`} key={message.id}><div><strong>{message.sender}</strong><time>{new Date(message.createdAt).toLocaleTimeString()}</time></div><p>{message.text}</p></article>) : <div className="empty-chat">ยังไม่มีข้อความ<br />เก็บไว้ชั่วคราวใน RAM สูงสุด 100 ข้อความ</div>}</div><form className="inline-form" onSubmit={sendChat}><input aria-label="พิมพ์ข้อความถึงห้อง" maxLength={800} value={chatDraft} onChange={event => setChatDraft(event.target.value)} disabled={busy || !token} placeholder="พิมพ์ข้อความถึงห้อง" /><button className="primary" disabled={busy || !token || !chatDraft.trim()}>ส่ง</button></form></section>}
 
     {tab === 'ตั้งค่า' && <div className="settings-grid">
       <section className="card form-card"><div><p className="eyebrow">LOCAL CONFIGURATION</p><h2>บัญชีและบริการ</h2></div><p className="muted">เพื่อไม่ส่งข้อมูลลับผ่านเว็บ ให้แก้ JWT, UUID, adapter token, Groq/Azure keys, ชื่อเรียก และ persona ใน <code>config.local.json</code> บนเครื่องที่รันบอทเท่านั้น</p><p>บัญชี YelloTalk: <strong>{config?.account.configured ? 'ตั้งค่าแล้ว' : 'ยังไม่ตั้งค่า'}</strong></p><p>Audio adapter ({config?.adapter.type || 'native'}): <strong>{config?.adapter.configured ? 'ตั้งค่าแล้ว' : 'ยังไม่ตั้งค่า'}</strong></p><p>Groq: <strong>{config?.groq.configured ? 'ตั้งค่าแล้ว' : 'ยังไม่ตั้งค่า'}</strong></p><p>Azure TTS: <strong>{config?.azureTts.configured ? 'ตั้งค่าแล้ว' : 'ยังไม่ตั้งค่า'}</strong></p><p className="muted">ต้องติดตั้ง/เริ่ม GME adapter แยกต่างหากก่อนเปิด playback; chat/TTS ยังอยู่ระหว่างย้ายระบบ</p></section>

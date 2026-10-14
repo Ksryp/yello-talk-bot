@@ -16,6 +16,7 @@ function normalizeRoom(room = {}) {
     gmeId,
     topic: String(room.topic || room.name || '').trim(),
     campus: String(room.owner?.group_shortname || room.campus || 'No Group').trim() || 'No Group',
+    ownerUuid: String(room.ownerUuid || room.owner?.uuid || room.owner_uuid || '').trim() || null,
   };
 }
 
@@ -57,6 +58,37 @@ function speakerList(payload) {
     if (Array.isArray(value)) return value;
   }
   return null;
+}
+
+const SEAT_COUNT = 10;
+
+function slotIsLocked(item) {
+  return item != null && (item.role === 'locked' || item.locked === true
+    || String(item.pin_name || item.name || '').trim() === '🔒');
+}
+
+function slotUuid(item) {
+  return String(item?.uuid || item?.user_uuid || '').trim();
+}
+
+// Normalizes YelloTalk's speaker_changed array into exactly SEAT_COUNT
+// 1-indexed seats: an open seat is a null entry (or an unlocked entry with no
+// occupant), a locked seat has role "locked", an occupied seat carries a uuid.
+function seatMap(speakers, ownUuid) {
+  const seats = Array.from({ length: SEAT_COUNT }, (_, i) => ({ position: i + 1, state: 'open', uuid: null, name: null, isBot: false }));
+  speakers.forEach((item, index) => {
+    const position = item && Number.isInteger(Number(item.position)) && Number(item.position) > 0 ? Number(item.position) : index + 1;
+    const seat = seats[position - 1];
+    if (!seat || item == null) return;
+    const uuid = slotUuid(item);
+    if (slotIsLocked(item) && !uuid) { seat.state = 'locked'; return; }
+    if (!uuid) return;
+    seat.state = 'occupied';
+    seat.uuid = uuid;
+    seat.name = String(item.pin_name || item.name || '').replace(/[\u0000-\u001F\u007F]/g, ' ').trim().slice(0, 40) || null;
+    seat.isBot = uuid === String(ownUuid);
+  });
+  return seats;
 }
 
 function emitWithTimeout(socket, event, payload, timeoutMs) {
@@ -142,6 +174,11 @@ class YelloTalkRoomSession {
       speakerJoined: false,
       speakerJoinPending: false,
       createRoom: Boolean(createRoom),
+      // The room owner already holds the host slot, so it never auto-climbs
+      // onto a speaker seat; seat changes then come only from the owner portal.
+      isHost: Boolean(createRoom) || (Boolean(roomInfo.ownerUuid) && roomInfo.ownerUuid === String(account.userUuid)),
+      autoSeat: !(Boolean(createRoom) || (Boolean(roomInfo.ownerUuid) && roomInfo.ownerUuid === String(account.userUuid))),
+      seats: null,
       participants: null,
     };
     this.session = session;
@@ -285,6 +322,7 @@ class YelloTalkRoomSession {
       if (!isCurrent() || session.status !== 'joined') return;
       const speakers = speakerList(data);
       if (!speakers) return;
+      session.seats = seatMap(speakers, account.userUuid);
       const ownSlot = speakers.find(item => String(item?.uuid || item?.user_uuid || '') === String(account.userUuid));
       if (ownSlot) {
         session.speakerJoined = true;
@@ -293,7 +331,7 @@ class YelloTalkRoomSession {
       }
       session.speakerJoined = false;
       this.callbacks.onSpeakerStatus({ joined: false, position: null });
-      if (session.speakerJoinPending) return;
+      if (!session.autoSeat || session.speakerJoinPending) return;
       // An open seat is either a null array entry or an object with no occupant
       // and not locked. YelloTalk positions are 1-indexed; a null entry's
       // position is its array index + 1, and occupied/locked entries carry an
@@ -359,6 +397,50 @@ class YelloTalkRoomSession {
     }
   }
 
+  seatsSnapshot() {
+    const session = this.session;
+    if (!session || session.status !== 'joined') return null;
+    return {
+      roomId: session.room.id,
+      isHost: session.isHost,
+      autoSeat: session.autoSeat,
+      seats: session.seats ? session.seats.map(seat => ({ ...seat })) : null,
+    };
+  }
+
+  async seatAction(action, position) {
+    const session = this.session;
+    if (!session || session.status !== 'joined' || !session.socket.connected) {
+      throw new Error('Join a YelloTalk room before changing seats');
+    }
+    const target = Number(position);
+    if (!Number.isInteger(target) || target < 1 || target > SEAT_COUNT) throw new Error(`Seat position must be 1-${SEAT_COUNT}`);
+    const room = session.room.id;
+    const uuid = session.account.userUuid;
+    const seats = session.seats || [];
+    const ownSeat = seats.find(seat => seat.isBot);
+    const emit = (event, payload) => emitWithTimeout(session.socket, event, payload, this.messageTimeoutMs).then(response => {
+      if (response?.result !== 200) throw new Error(response?.description || `YelloTalk rejected ${event}`);
+      return response;
+    });
+    // Any owner seat action takes over from the automatic seat climber.
+    session.autoSeat = false;
+    if (action === 'take') {
+      if (ownSeat?.position === target) return { position: target };
+      if (ownSeat) await emit('leave_speaker', { room, uuid, position: ownSeat.position });
+      await emit('join_speaker', { room, uuid, position: target });
+      return { position: target };
+    }
+    if (action === 'leave') {
+      if (!ownSeat) return { position: null };
+      await emit('leave_speaker', { room, uuid, position: ownSeat.position });
+      return { position: null };
+    }
+    if (action === 'unlock') { await emit('unlock_speaker', { room, position: target }); return { position: target }; }
+    if (action === 'lock') { await emit('lock_speaker', { room, position: target }); return { position: target }; }
+    throw new Error('Unknown seat action');
+  }
+
   async sendMessage(message) {
     const session = this.session;
     const text = String(message || '').trim();
@@ -411,6 +493,7 @@ module.exports = {
   DEFAULT_JOIN_TIMEOUT_MS,
   DEFAULT_MESSAGE_TIMEOUT_MS,
   MAX_ROOM_MESSAGE_LENGTH,
+  SEAT_COUNT,
   YELLOWTALK_SOCKET_URL,
   YelloTalkRoomSession,
   normalizeRoom,

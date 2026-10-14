@@ -44,7 +44,10 @@ javac -source 8 -target 8 -classpath "$platform_jar:$gme_android_jar" \
   -d "$classes_dir" \
   "$script_dir/src/com/gmebot/test/MainActivity.java" "$build_config"
 class_files=("$classes_dir"/com/gmebot/test/*.class)
-"$d8" --min-api 21 --lib "$platform_jar" --output "$dex_dir" "${class_files[@]}"
+# Dex our classes together with the bundled GME SDK jar; the GME Java classes
+# (ITMGContext, AuthBuffer, ...) must live in the APK's dex or the app crashes
+# with NoClassDefFoundError the moment it touches the SDK at runtime.
+"$d8" --min-api 21 --lib "$platform_jar" --output "$dex_dir" "${class_files[@]}" "$gme_android_jar"
 cp "$dex_dir/classes.dex" "$apk_dir/classes.dex"
 cp "${gme_native_libs[@]}" "$apk_dir/lib/x86_64/"
 

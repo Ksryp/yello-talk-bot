@@ -5,6 +5,7 @@ const { MusicQueueService } = require('./music-queue-service');
 
 const FADE_DURATION_MS = 1500;
 const FADE_STEP_MS = 100;
+const FADE_START_VOLUME = 20;
 
 function serviceError(code, message) {
   const error = new Error(message);
@@ -120,7 +121,7 @@ class MusicPlaybackService {
       }
       this.currentFile = file;
       const fadeGeneration = this.cancelFade();
-      await this.writeOutputVolume(0, 'GME adapter could not prepare playback fade');
+      await this.writeOutputVolume(Math.min(FADE_START_VOLUME, this.targetVolume()), 'GME adapter could not prepare playback fade');
       adapterMayBePlaying = true;
       const result = await this.adapter.play({ file, loop: false });
       assertAdapterSuccess(result, 'GME adapter could not start audio playback');

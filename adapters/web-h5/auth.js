@@ -136,16 +136,17 @@ function buildAuthBufferPlaintext(userId, roomId, sdkAppId = GME_SDK_APP_ID, exp
  * Generate GME AuthBuffer as base64 string.
  * @param {string} userId
  * @param {string} roomId
+ * @param {{appId?: number, secret?: string}} [credentials] defaults to the env vars
  * @returns {string} base64-encoded auth buffer
  */
-function generateAuthBuffer(userId, roomId) {
-  if (!Number.isSafeInteger(GME_SDK_APP_ID) || GME_SDK_APP_ID <= 0 || Buffer.byteLength(GME_SECRET, 'utf8') < 16) {
+function generateAuthBuffer(userId, roomId, { appId = GME_SDK_APP_ID, secret = GME_SECRET } = {}) {
+  if (!Number.isSafeInteger(appId) || appId <= 0 || Buffer.byteLength(secret, 'utf8') < 16) {
     throw new Error('GME SDK credentials are not configured in the local environment');
   }
-  const keyBuf = Buffer.from(GME_SECRET, 'utf-8');
+  const keyBuf = Buffer.from(secret, 'utf-8');
   if (keyBuf.length !== 16) throw new Error(`Key must be 16 bytes, got ${keyBuf.length}`);
 
-  const plaintext = buildAuthBufferPlaintext(userId, roomId);
+  const plaintext = buildAuthBufferPlaintext(userId, roomId, appId);
   const ciphertext = qqTeaEncrypt(plaintext, keyBuf);
   return ciphertext.toString('base64');
 }

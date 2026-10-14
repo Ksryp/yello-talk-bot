@@ -25,10 +25,28 @@ public class MainActivity extends Activity {
   volatile int volume=100;
   volatile int roomType=0;
   volatile boolean inRoom=false, songFinished=false;
+  volatile boolean inited=false;   // GME context Init done once per process
+  // Debug: when on, GME plays the outgoing mix (mic + accompany) on the local
+  // speaker so the owner can hear exactly what the room receives.
+  volatile boolean loopback=false;
   // New rooms use the highest-fidelity GME profile by default. The Portal can
   // change it later through POST /room-quality.
   static final int DEFAULT_ROOM_TYPE = ITMGContext.ITMG_ROOM_TYPE_HIGHQUALITY;
 
+  // GME requires a NUMERIC openId (a uint32-range id; YelloTalk's own gme_user_id
+  // is such a number). A raw account UUID ("fc7f7c1e-cb5d-...") is rejected by
+  // Init with 1004 AV_ERR_INVALID_ARGUMENT, which then makes EnterRoom fail with
+  // 1101 "AVContext did not start". Map any non-numeric id to a stable positive
+  // 31-bit number (FNV-1a) so the same account always gets the same GME identity.
+  // The SAME derived id must be used for Init and for genAuthBuffer or the auth
+  // signature will not match the joining user.
+  static String gmeOpenId(String raw){
+    if(raw!=null && raw.matches("[0-9]{1,9}")) return raw;
+    long h=2166136261L;
+    if(raw!=null) for(int i=0;i<raw.length();i++){ h^=(raw.charAt(i)&0xFF); h=(h*16777619L)&0xFFFFFFFFL; }
+    long v=h&0x7FFFFFFFL; if(v==0) v=1;
+    return String.valueOf(v);
+  }
   static String roomTypeName(int type){ return type==1?"fluency":type==2?"standard":type==3?"highquality":"unknown"; }
   static int parseRoomType(String value){
     if(value==null)return 0; value=value.toLowerCase();
@@ -107,9 +125,24 @@ public class MainActivity extends Activity {
     }
     if(path.startsWith("/join")){
       room=req.optString("room",""); final String user=req.optString("user","0"); final String uuid=req.optString("uuid",user);
+      final String oid=gmeOpenId(uuid);   // GME-valid numeric id used for BOTH Init and genAuthBuffer
       status="joining";inRoom=false;roomType=0;lastError=null;
-      onMain(new Op(){public void run(){ ctx.Init(String.valueOf(APPID),user); byte[] a=AuthBuffer.getInstance().genAuthBuffer(APPID,room,uuid,KEY); ctx.EnterRoom(room,DEFAULT_ROOM_TYPE,a);} });
-      long t0=System.currentTimeMillis(); while(!inRoom && lastError==null && System.currentTimeMillis()-t0<20000){ Thread.sleep(150); }
+      // GME's context start is ASYNCHRONOUS: Init() dispatches a StartTask to a
+      // worker thread (Start returns 1004) that only reaches the "started" state
+      // once the Poll loop on the main looper has driven it for a few cycles.
+      // Calling EnterRoom in the same main-thread tick as Init races that start
+      // and always fails with 1101 "AVContext did not start". So: Init once,
+      // then retry EnterRoom on later ticks, yielding the main thread between
+      // attempts so Poll() can bring the context up.
+      if(!inited){ onMain(new Op(){public void run(){ int rc=ctx.Init(String.valueOf(APPID),oid); Log.i(TAG,"Init rc="+rc); }}); inited=true; }
+      for(int attempt=0; attempt<15 && !inRoom; attempt++){
+        Thread.sleep(600);   // let Poll() cycles advance the context start
+        lastError=null;
+        onMain(new Op(){public void run(){ byte[] a=AuthBuffer.getInstance().genAuthBuffer(APPID,room,oid,KEY); int rc=ctx.EnterRoom(room,DEFAULT_ROOM_TYPE,a); Log.i(TAG,"EnterRoom rc="+rc+" attempt="+room); }});
+        long t0=System.currentTimeMillis(); while(!inRoom && lastError==null && System.currentTimeMillis()-t0<2500){ Thread.sleep(120); }
+        if(inRoom) break;
+        if(lastError!=null && lastError.indexOf("1101")<0) break;   // a real error, stop retrying
+      }
       j.put("ok",inRoom);j.put("inRoom",inRoom);j.put("status",status);j.put("error",lastError);return j.toString();
     }
     if(path.startsWith("/play")){
@@ -118,7 +151,7 @@ public class MainActivity extends Activity {
       final int[] rc={-999};
       onMain(new Op(){public void run(){
         ctx.GetAudioCtrl().EnableAudioCaptureDevice(true); ctx.GetAudioCtrl().EnableAudioSend(true);
-        ctx.GetAudioCtrl().SetMicVolume(0); ctx.GetAudioCtrl().EnableSpeaker(false);
+        ctx.GetAudioCtrl().SetMicVolume(0); ctx.GetAudioCtrl().EnableSpeaker(loopback); ctx.GetAudioCtrl().EnableLoopBack(loopback);
         int stopRc=ctx.GetAudioEffectCtrl().StopAccompany(0);
         rc[0]=ctx.GetAudioEffectCtrl().StartAccompany(file,true,loop?-1:1);
         if(rc[0]!=0){ int s2=ctx.GetAudioEffectCtrl().StopAccompany(0); rc[0]=ctx.GetAudioEffectCtrl().StartAccompany(file,true,loop?-1:1); Log.i(TAG,"PLAY-RETRY stop2="+s2+" start2="+rc[0]); }
@@ -145,6 +178,17 @@ public class MainActivity extends Activity {
       j.put("success",rc[0]==0);j.put("roomType",roomType);j.put("roomQuality",roomTypeName(roomType));
       if(rc[0]!=0)j.put("error","ChangeRoomType failed: "+rc[0]);
       return j.toString();
+    }
+    if(path.startsWith("/loopback")){
+      loopback=req.optBoolean("on",false);
+      final int[] rc={-999,-999};
+      onMain(new Op(){public void run(){ rc[0]=ctx.GetAudioCtrl().EnableSpeaker(loopback); rc[1]=ctx.GetAudioCtrl().EnableLoopBack(loopback); Log.i(TAG,"LOOPBACK on="+loopback+" speakerRc="+rc[0]+" loopbackRc="+rc[1]); }});
+      j.put("ok",rc[0]==0&&rc[1]==0);j.put("loopback",loopback);j.put("speakerRc",rc[0]);j.put("loopbackRc",rc[1]);return j.toString();
+    }
+    if(path.startsWith("/levels")){
+      final int[] lv={-1,-1,-1};
+      onMain(new Op(){public void run(){ lv[0]=ctx.GetAudioCtrl().GetSendStreamLevel(); lv[1]=ctx.GetAudioCtrl().GetMicLevel(); lv[2]=ctx.GetAudioCtrl().GetSpeakerLevel(); }});
+      j.put("sendStreamLevel",lv[0]);j.put("micLevel",lv[1]);j.put("speakerLevel",lv[2]);j.put("loopback",loopback);j.put("status",status);return j.toString();
     }
     if(path.startsWith("/leave")){ onMain(new Op(){public void run(){ try{ctx.GetAudioEffectCtrl().StopAccompany(0);}catch(Throwable t){} ctx.ExitRoom();} }); inRoom=false;roomType=0;status="idle";room=null;curFile=null; j.put("ok",true);return j.toString(); }
     j.put("error","unknown"); return j.toString();

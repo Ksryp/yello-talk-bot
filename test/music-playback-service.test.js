@@ -97,7 +97,7 @@ test('stops the adapter before releasing the active file from its session cache'
   const activeFile = calls.played[0].file;
 
   assert.deepEqual(calls.fadeWaits.slice(0, 15), Array(15).fill(100));
-  assert.equal(calls.volumes[0], 0);
+  assert.equal(calls.volumes[0], 20);
   assert.equal(calls.volumes[15], 80);
 
   await service.stop();
@@ -136,7 +136,7 @@ test('skip fades out and releases the old track before starting the next track',
 
   assert.equal(service.snapshot().queue.current.title, 'B');
   assert.deepEqual(calls.fadeWaits.slice(0, 15), Array(15).fill(100));
-  assert.deepEqual(calls.order.slice(14, 18), ['volume:0', 'stop', `release:${oldFile}`, 'volume:0']);
+  assert.deepEqual(calls.order.slice(14, 18), ['volume:0', 'stop', `release:${oldFile}`, 'volume:20']);
   assert.equal(calls.order.findIndex(item => item.startsWith('play:')), 18);
 });
 
@@ -162,7 +162,7 @@ test('music volume changes cancel a pending fade and retain the latest requested
   releaseFadeStep();
   await Promise.all([request, starting]);
 
-  assert.deepEqual(calls.volumes, [0, 41]);
+  assert.deepEqual(calls.volumes, [20, 41]);
   assert.equal(service.snapshot().status, 'playing');
   await service.detachRoom();
 });

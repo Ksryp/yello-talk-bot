@@ -90,6 +90,23 @@ function createRoomRouter({
     }
   });
 
+  router.get('/api/room/seats', ownerAuth, (_req, res) => {
+    const seats = typeof session.seatsSnapshot === 'function' ? session.seatsSnapshot() : null;
+    return res.json({ connected: Boolean(seats), ...(seats || {}) });
+  });
+
+  router.post('/api/room/seat', ownerAuth, async (req, res) => {
+    const action = String(req.body?.action || '');
+    if (!['take', 'leave', 'unlock', 'lock'].includes(action)) return res.status(400).json({ error: 'Seat action must be take, leave, unlock, or lock' });
+    if (session.snapshot().status !== 'joined') return res.status(409).json({ error: 'Join a room before changing seats' });
+    try {
+      const result = await session.seatAction(action, req.body?.position ?? 1);
+      return res.json({ ok: true, action, ...result });
+    } catch (error) {
+      return res.status(502).json({ error: String(error?.message || 'Seat action failed').slice(0, 200) });
+    }
+  });
+
   router.post('/api/room/leave', ownerAuth, async (_req, res) => {
     if (roomActionLock.pending) return res.status(409).json({ error: 'A room action is already in progress' });
     roomActionLock.pending = true;
