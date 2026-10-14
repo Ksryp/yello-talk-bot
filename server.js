@@ -111,7 +111,16 @@ function createApp({ configPath, tokenPath, logger = console, apiClient, roomSes
       try { ttsPlayback?.handleMessage(data); } catch {}
       if (roomReplyService) void roomReplyService.handleMessage(data).catch(() => {});
     },
+    onSpeakerStatus: status => {
+      if (status?.joined) console.log(`[seat] bot took speaker position ${status.position}`);
+      else if (status?.joining) console.log(`[seat] requesting speaker position ${Number(status.position) + 1}`);
+      else console.log('[seat] bot is not on a speaker seat');
+    },
     onParticipantEvent: event => {
+      if (event?.type === 'join' || event?.type === 'leave') {
+        const verb = event.type === 'join' ? 'joined' : 'left';
+        console.log(`[room] ${event.displayName || event.uuid || 'someone'} ${verb} the room`);
+      }
       if (participantGreetingService) void participantGreetingService.handleParticipantEvent(event).catch(() => {});
     },
     onManualLeave: async () => {
