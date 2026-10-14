@@ -294,13 +294,26 @@ class YelloTalkRoomSession {
       session.speakerJoined = false;
       this.callbacks.onSpeakerStatus({ joined: false, position: null });
       if (session.speakerJoinPending) return;
-      const emptySlot = speakers.find(item => item?.locked !== true
-        && String(item?.pin_name || item?.name || '').trim().toLowerCase() === 'empty'
-        && Number.isInteger(Number(item?.position)));
-      if (!emptySlot) return;
+      // An open seat is either a null array entry or an object with no occupant
+      // and not locked. YelloTalk positions are 1-indexed; a null entry's
+      // position is its array index + 1, and occupied/locked entries carry an
+      // explicit `position`.
+      let emptyIndex = -1;
+      for (let i = 0; i < speakers.length; i++) {
+        const item = speakers[i];
+        const isOpen = item == null
+          || (item.role !== 'locked' && item.locked !== true
+            && !String(item.uuid || item.user_uuid || '').trim()
+            && String(item.pin_name || item.name || '').trim().toLowerCase() !== '🔒');
+        if (isOpen) { emptyIndex = i; break; }
+      }
+      if (emptyIndex < 0) return;
 
       session.speakerJoinPending = true;
-      const position = Number(emptySlot.position) + 1;
+      const slot = speakers[emptyIndex];
+      const position = slot && Number.isInteger(Number(slot.position))
+        ? Number(slot.position)
+        : emptyIndex + 1;
       const pendingAck = emitWithTimeout(socket, 'join_speaker', {
         room: roomInfo.id,
         uuid: account.userUuid,
